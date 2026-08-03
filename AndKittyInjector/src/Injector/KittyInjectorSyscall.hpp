@@ -43,6 +43,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <algorithm>
 
 #include <KittyMemoryMgr.hpp>
 
@@ -67,6 +68,8 @@ public:
 
         _ptrValidator.setUseCache(false);
         _ptrValidator.setPID(kMgr->processID());
+
+        setupSyscallGadget();
 
         return true;
     }
@@ -179,5 +182,113 @@ public:
     inline std::string lastError() const
     {
         return _lastError.empty() ? "null" : _lastError;
+    }
+
+    inline void setupSyscallGadget() const
+    {
+        struct SigConfig
+        {
+            std::vector<uint8_t> signature;
+            size_t alignment;
+            uintptr_t bias;
+        };
+
+#if defined(__aarch64__)
+        const std::vector<SigConfig> ARCH_SIGS = {
+            {{0x01, 0x00, 0x00, 0xd4}, 4, 0} // svc #0
+        };
+#elif defined(__arm__)
+        const std::vector<SigConfig> ARCH_SIGS = {
+            {{0x00, 0x00, 0x00, 0xef}, 4, 0}, // 1st Choice: ARM Mode svc #0
+            {{0x00, 0xdf}, 2, 1}              // 2nd Choice: Thumb Mode svc #0
+        };
+#elif defined(__x86_64__)
+        const std::vector<SigConfig> ARCH_SIGS = {
+            {{0x0f, 0x05}, 1, 0} // syscall
+        };
+#elif defined(__i386__)
+        const std::vector<SigConfig> ARCH_SIGS = {
+            {{0xcd, 0x80}, 1, 0} // int 0x80
+        };
+#endif
+
+        auto getMapPriority = [](const std::string &path) -> int {
+            if (path == "[vdso]")
+                return 1;
+
+            if (path.find("/arm/") == std::string::npos && path.find("/arm64/") == std::string::npos)
+            {
+                if (path.find("/libc.so") != std::string::npos)
+                    return 2;
+
+                if (path.rfind("/system/", 0) == 0)
+                {
+                    if (path.find(".so") != std::string::npos)
+                    {
+                        return 3;
+                    }
+                }
+            }
+
+            if (path.find("/libc.so") != std::string::npos)
+                return 4;
+
+            if (path.rfind("/system/", 0) == 0)
+            {
+                if (path.find(".so") != std::string::npos)
+                {
+                    return 5;
+                }
+            }
+
+            return 6;
+        };
+
+        auto maps = KittyMemoryEx::getMaps(_kMgr->processID(),
+                                           KittyMemoryEx::EProcMapFilter::Regex,
+                                           "(^\\[vdso\\]$)|(^/system/.*\\.so$)");
+
+        std::stable_sort(maps.begin(),
+                         maps.end(),
+                         [&](const KittyMemoryEx::ProcMap &a, const KittyMemoryEx::ProcMap &b) {
+                             int priorityA = getMapPriority(a.pathname);
+                             int priorityB = getMapPriority(b.pathname);
+
+                             // If priorities are different, sort by priority (lower number comes first)
+                             if (priorityA != priorityB)
+                             {
+                                 return priorityA < priorityB;
+                             }
+
+                             // If they have the same priority (e.g., both are segments of libc),
+                             // keep them ordered by their start address
+                             return a.startAddress < b.startAddress;
+                         });
+
+        for (auto &it : maps)
+        {
+            if (!it.readable || !it.executable || !it.is_private)
+                continue;
+
+            for (const auto &config : ARCH_SIGS)
+            {
+                auto results = _kMgr->memScanner.findDataAll(it.startAddress,
+                                                             it.endAddress,
+                                                             config.signature.data(),
+                                                             config.signature.size());
+                for (auto &res : results)
+                {
+                    if (res == 0 || (res % config.alignment) != 0)
+                        continue;
+
+                    KITTY_LOGI("KittyRemoteSys: Using syscall gadget at %p from %s",
+                               (void *)(res + config.bias),
+                               it.toString().c_str());
+
+                    _kMgr->trace.setSyscallGadget(res + config.bias);
+                    return;
+                }
+            }
+        }
     }
 };

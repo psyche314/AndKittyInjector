@@ -32,7 +32,7 @@
     }
 
 #define kPROGRAM_NAME "AndKittyInjector"
-#define kPROGRAM_VER "5.2.1"
+#define kPROGRAM_VER "5.3.0"
 
 bool inject(int pid,
             const std::vector<std::string> &libs,
@@ -50,17 +50,25 @@ int main(int argc, char *args[])
 
     argparse::ArgumentParser program(kPROGRAM_NAME, kPROGRAM_VER);
 
+    int target_pid = 0;
     inject_elf_config_t inj_cfg = {};
 
     inj_cfg.sdk = KittyUtils::Android::getSDK();
     inj_cfg.seize = inj_cfg.sdk >= 24;
     inj_cfg.rtdl_flags = RTLD_LOCAL | RTLD_NOW;
 
-    program.add_argument("--package")
-        .help("Target package name to inject into.")
-        .required()
-        .store_into(inj_cfg.package)
-        .metavar("<name>");
+    auto &proc_group = program.add_mutually_exclusive_group(true);
+    {
+        proc_group.add_argument("--pid")
+            .help("Target process ID to inject into.")
+            .store_into(target_pid)
+            .metavar("<id>");
+
+        proc_group.add_argument("--package")
+            .help("Target package name to inject into.")
+            .store_into(inj_cfg.package)
+            .metavar("<name>");
+    }
 
     std::vector<std::string> libs;
     program.add_argument("--libs")
@@ -70,11 +78,25 @@ int main(int argc, char *args[])
         .store_into(libs)
         .metavar("<paths>");
 
-    program.add_argument("--launch").help("Launch process and inject.").store_into(inj_cfg.launch);
+    auto &pmon_group = program.add_mutually_exclusive_group(false);
+    {
+        pmon_group.add_argument("--launch").help("Launch process and inject.").store_into(inj_cfg.launch);
 
-    program.add_argument("--watch").help("Monitor process start then inject.").store_into(inj_cfg.watch);
+        pmon_group.add_argument("--watch").help("Watch for process start then inject.").store_into(inj_cfg.watch);
+    }
 
-    program.add_argument("--bp").help("Inject after native/emulated dlopen breakpoint hit.").store_into(inj_cfg.bp);
+    auto &bp_group = program.add_mutually_exclusive_group(false);
+    {
+        bp_group.add_argument("--bp-ld")
+            .help("Inject after first native/emulated loadlibrary breakpoint hit.")
+            .store_into(inj_cfg.bp);
+
+        bp_group.add_argument("--bp-sym")
+            .nargs(2)
+            .metavar("<binary> <symbol>")
+            .store_into(inj_cfg.bp_args)
+            .help("Inject after first breakpoint on binary path and symbol name. (e.g., /libc.so malloc)");
+    }
 
     program.add_argument("--delay")
         .help("Delay injection in microseconds.")
@@ -97,6 +119,19 @@ int main(int argc, char *args[])
     try
     {
         program.parse_args(argc, args);
+
+        if ((inj_cfg.launch || inj_cfg.watch) && target_pid != 0)
+        {
+            KITTY_LOGE("Can't use --pid with --launch or --watch");
+            return 1;
+        }
+
+        if (target_pid != 0 && inj_cfg.package.empty())
+        {
+            inj_cfg.package = KittyMemoryEx::getProcessName(target_pid);
+        }
+
+        inj_cfg.bp |= (inj_cfg.bp_args.size() == 2);
     }
     catch (const std::exception &err)
     {
@@ -106,11 +141,23 @@ int main(int argc, char *args[])
     }
 
     KITTY_LOGI("======== INJECTION ARGS ========");
-    KITTY_LOGI("package: %s", inj_cfg.package.c_str());
+    if (target_pid != 0)
+    {
+        KITTY_LOGI("process: %d", target_pid);
+    }
+    else
+    {
+        KITTY_LOGI("package: %s", inj_cfg.package.c_str());
+    }
     KITTY_LOGI("sdk: %d", inj_cfg.sdk);
     KITTY_LOGI("launch: %d", inj_cfg.launch ? 1 : 0);
     KITTY_LOGI("watch: %d", inj_cfg.watch ? 1 : 0);
     KITTY_LOGI("bp: %d", inj_cfg.bp);
+    if (!inj_cfg.bp_args.empty())
+    {
+        KITTY_LOGI("bp_binary: %s", inj_cfg.bp_args[0].c_str());
+        KITTY_LOGI("bp_symbol: %s", inj_cfg.bp_args[1].c_str());
+    }
     KITTY_LOGI("delay: %dus", inj_cfg.delay);
     KITTY_LOGI("timeout: %dms", inj_cfg.timeout);
     KITTY_LOGI("memfd: %d", inj_cfg.memfd ? 1 : 0);
@@ -154,7 +201,7 @@ int main(int argc, char *args[])
         if (inj_cfg.delay > 0)
             SLEEP_MICROS(inj_cfg.delay);
 
-        int app_pid = KittyMemoryEx::getProcessID(inj_cfg.package);
+        int app_pid = target_pid != 0 ? target_pid : KittyMemoryEx::getProcessID(inj_cfg.package);
         if (app_pid <= 0)
         {
             KITTY_LOGE("Couldn't find process ID of %s.", inj_cfg.package.c_str());
@@ -164,7 +211,7 @@ int main(int argc, char *args[])
         injection_ok = inject(app_pid, libs, inj_cfg, &injected_libs_info);
     }
 
-    if (!injection_ok)
+    if (!injection_ok && (inj_cfg.launch || inj_cfg.watch))
     {
         KITTY_LOGE("Injection failed.");
         Utils::android_stop_app(inj_cfg.package);
@@ -205,14 +252,21 @@ bool inject(int pid,
     // Manually initialize tracer to seize and interrupt as soon as possible
     kmgr.trace = KittyTraceMgr(pid, 0, true);
 
-    /*if (!kmgr.trace.stopAllThreads())
+    if (kill(pid, SIGSTOP) == -1)
     {
-        KITTY_LOGE("Failed to stop all threads of target process.");
-        kmgr.trace.detach();
+        KITTY_LOGE("Failed to stop target process threads!");
         return false;
     }
 
-    KITTY_LOGI("Stopped all threads of target process successfully.");*/
+    KITTY_LOGI("Stopped target process threads successfully.");
+
+    // resume main thread only
+    // main thread should be stopped by ptrace attach/seize
+    if (tgkill(pid, pid, SIGCONT) == -1)
+    {
+        KITTY_LOGE("tgkill(%d, SIGCONT) failed. \"%s\".", pid, strerror(errno));
+        return false;
+    }
 
     errno = 0;
     bool attached = cfg.seize = cfg.sdk >= 21 && kmgr.trace.seize(PTRACE_O_EXITKILL | PTRACE_O_TRACESYSGOOD);
@@ -223,18 +277,18 @@ bool inject(int pid,
 
     if (!attached)
     {
-        KITTY_LOGE("Failed to attach to process.");
+        KITTY_LOGE("Failed to attach to target process.");
         return false;
     }
 
     if (cfg.seize && !kmgr.trace.stop())
     {
-        KITTY_LOGE("Failed to interrupt process.");
+        KITTY_LOGE("Failed to interrupt target process.");
         kmgr.trace.detach();
         return false;
     }
 
-    KITTY_LOGI("Attached to process successfully.");
+    KITTY_LOGI("Attached to target process successfully.");
 
     KITTY_LOGI("Initializing Injector...");
 
@@ -290,7 +344,7 @@ bool inject(int pid,
     std::string cmdline;
     std::string cmdlinePath = KittyUtils::String::fmt("/proc/%d/cmdline", pid);
     KittyIOFile::readFileToString(cmdlinePath, &cmdline);
-    KITTY_LOGI("Proccess current cmdline (\"%s\").", cmdline.c_str());
+    KITTY_LOGI("Injector: Proccess current cmdline (\"%s\").", cmdline.c_str());
 
     for (auto &it : libs)
     {
@@ -311,9 +365,27 @@ bool inject(int pid,
 
     inj_ms = std::chrono::high_resolution_clock::now() - tm_start;
 
-    kmgr.trace.waitSyscall();
-    kmgr.trace.detach();
-    // kmgr.trace.contAllThreads();
+    if (!kmgr.trace.waitSyscall())
+    {
+        KITTY_LOGE("Failed to wait syscall for detach!");
+        return false;
+    }
+
+    if (!kmgr.trace.detach())
+    {
+        KITTY_LOGE("Failed to detach!");
+        return false;
+    }
+
+    KITTY_LOGI("Dettached from target process successfully.");
+
+    if (kill(pid, SIGCONT) == -1)
+    {
+        KITTY_LOGE("Failed to resume target process threads!");
+        return false;
+    }
+
+    KITTY_LOGI("Resumed target process threads successfully.");
 
     return true;
 }

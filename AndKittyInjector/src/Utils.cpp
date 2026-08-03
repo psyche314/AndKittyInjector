@@ -23,6 +23,20 @@ static std::string _execCmd(const std::string &cmd)
     return result;
 }
 
+static bool _isValidPackageName(const std::string &pkg)
+{
+    if (pkg.empty())
+        return false;
+
+    for (char c : pkg)
+    {
+        if (!(isalnum((unsigned char)c) || c == '.' || c == '_'))
+            return false;
+    }
+
+    return true;
+}
+
 static bool _isValidActivity(const std::string &pkg, const std::string &act)
 {
     if (act.empty())
@@ -58,6 +72,9 @@ static bool _isValidActivity(const std::string &pkg, const std::string &act)
 
 static std::string _resolveActivity(const std::string &pkg)
 {
+    if (!_isValidPackageName(pkg))
+        return "";
+
     std::string act = _execCmd("cmd package resolve-activity --brief " + pkg + " 2>/dev/null | tail -n 1");
     if (_isValidActivity(pkg, act))
         return act;
@@ -75,6 +92,9 @@ namespace Utils
 {
     bool android_launch_app(const std::string &pkg)
     {
+        if (!_isValidPackageName(pkg))
+            return false;
+
         std::string activity = _resolveActivity(pkg);
         if (!activity.empty())
         {
@@ -100,6 +120,9 @@ namespace Utils
 
     bool android_stop_app(const std::string &pkg)
     {
+        if (!_isValidPackageName(pkg))
+            return false;
+
         std::string cmd = "am force-stop " + pkg + " > /dev/null 2>&1";
         system(cmd.c_str());
 

@@ -57,6 +57,7 @@ struct inject_elf_config_t
 {
     int sdk, rtdl_flags, delay, timeout;
     bool watch, launch, seize, bp, memfd, free, hide;
+    std::vector<std::string> bp_args;
     std::string package;
     std::function<void(inject_elf_info_t &injected)> beforeEntryPoint, afterEntryPoint;
 

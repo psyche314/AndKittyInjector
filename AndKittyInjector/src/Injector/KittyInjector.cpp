@@ -166,39 +166,80 @@ bool KittyInjector::validateElf(const std::string &elfPath, KT_ElfW(Ehdr) * hdr,
 bool KittyInjector::waitBreakpoint(bool needsNB)
 {
     uintptr_t bp_addr = 0;
-    if (!needsNB)
+
+    if (!_cfg.bp_args.empty())
     {
-        bp_addr = _rdlopen;
-        // bp_addr = _rdlclose;
-        // bp_addr = _rdlsym;
-        // bp_addr = _rdlerror;
-        // bp_addr = _kMgr->elfScanner.findRemoteSymbol("getpid", uintptr_t(getpid));
-        // bp_addr = _kMgr->elfScanner.findRemoteSymbol("gettid", uintptr_t(gettid));
+        std::string bp_binary = _cfg.bp_args[0];
+        std::string bp_symbol = _cfg.bp_args[1];
+
+        auto elf = _kMgr->elfScanner.findElf(bp_binary);
+        if (elf.isValid())
+        {
+            bp_addr = elf.findSymbol(bp_symbol);
+            if (bp_addr == 0)
+            {
+                bp_addr = elf.findDebugSymbol(bp_symbol);
+            }
+        }
+
+        if (bp_addr == 0)
+        {
+            KITTY_LOGI("Injector: Couldn't find the specified breakpoint target symbol!");
+            return false;
+        }
     }
     else
     {
-        nbItf_data_t callbacks{};
-        if (!findNbCallbacks(&callbacks))
+        if (!needsNB)
         {
-            KITTY_LOGE("Injector: Couldn't find nb callbacks!");
+            bp_addr = _rdlopen;
+            // bp_addr = _rdlclose;
+            // bp_addr = _rdlsym;
+            // bp_addr = _rdlerror;
+            // bp_addr = _kMgr->elfScanner.findRemoteSymbol("getpid", uintptr_t(getpid));
+            // bp_addr = _kMgr->elfScanner.findRemoteSymbol("gettid", uintptr_t(gettid));
         }
         else
         {
-            bp_addr = callbacks.version < KT_NB_NAMESPACE_VERSION ? uintptr_t(callbacks.loadLibrary)
-                                                                  : uintptr_t(callbacks.loadLibraryExt);
+            nbItf_data_t callbacks{};
+            if (!findNbCallbacks(&callbacks))
+            {
+                KITTY_LOGE("Injector: Couldn't find nb callbacks!");
+            }
+            else
+            {
+                bp_addr = callbacks.version < KT_NB_NAMESPACE_VERSION ? uintptr_t(callbacks.loadLibrary)
+                                                                      : uintptr_t(callbacks.loadLibraryExt);
+            }
         }
-    }
 
-    if (bp_addr == 0)
-    {
-        KITTY_LOGI("Injector: Couldn't find a breakpoint target!");
-        return false;
+        if (bp_addr == 0)
+        {
+            KITTY_LOGI("Injector: Couldn't find a breakpoint target!");
+            return false;
+        }
     }
 
     KITTY_LOGI("Injector: Creating breakpoint at %p...", (void *)bp_addr);
 
+    // breakpoint return paths that will mostly cause crashes
+    static std::vector<std::string> forbidden_return_paths = {"/libnativebridge.so", "/libbinder.so"};
+
     auto bp_ok = [&](user_regs_struct *regs) -> bool {
-        if (!needsNB)
+        auto pc_map = KittyMemoryEx::getAddressMap(_kMgr->processID(), regs->KT_REG_PC);
+        KITTY_LOGI("bp]: PC(%p) -> %s", (void *)regs->KT_REG_PC, pc_map.toString().c_str());
+
+        uintptr_t ret_addr = _kMgr->trace.getReturnAddressFromRegs(regs);
+        auto ret_map = KittyMemoryEx::getAddressMap(_kMgr->processID(), ret_addr);
+        KITTY_LOGI("bp]: Return Address (%p) -> %s", (void *)ret_addr, ret_map.toString().c_str());
+
+        // skip forbidden
+        bool should_skip = KittyUtils::String::contains(ret_map.pathname,
+                                                        std::vector<std::string>{"/system/", "/apex/"}) &&
+                           KittyUtils::String::contains(ret_map.pathname, forbidden_return_paths);
+
+        // --bp-dl
+        if (_cfg.bp_args.empty())
         {
             uintptr_t arg0 = _kMgr->trace.getArgFromRegs<uintptr_t>(regs, 0);
             uintptr_t arg1 = _kMgr->trace.getArgFromRegs<uintptr_t>(regs, 1);
@@ -208,16 +249,17 @@ bool KittyInjector::waitBreakpoint(bool needsNB)
 
             KITTY_LOGI("bp]: dlopen(%s, %d)", filePath.c_str(), flags);
 
-            std::string pc_map = KittyMemoryEx::getAddressMap(_kMgr->processID(), regs->KT_REG_PC).toString();
-            KITTY_LOGI("bp]: PC(%p) -> %s", (void *)regs->KT_REG_PC, pc_map.c_str());
+            if (KittyUtils::String::contains(filePath, "libnativebridge.so"))
+            {
+                KITTY_LOGW("bp]: Skipping forbidden library load (%s)...", filePath.c_str());
+                return false;
+            }
+        }
 
-            uintptr_t ret_addr = _kMgr->trace.getReturnAddressFromRegs(regs);
-            std::string ret_map = KittyMemoryEx::getAddressMap(_kMgr->processID(), ret_addr).toString();
-            KITTY_LOGI("bp]: Return Address (%p) -> %s", (void *)ret_addr, ret_map.c_str());
-
-            // stay away from libnativebridge.so in native injection
-            return (!KittyUtils::String::contains(ret_map, "libnativebridge.so") &&
-                    !KittyUtils::String::contains(filePath, "libnativebridge.so"));
+        if (should_skip)
+        {
+            KITTY_LOGW("bp]: Skipping forbidden return path (%s)...", ret_map.pathname.c_str());
+            return false;
         }
 
         return true;
@@ -574,7 +616,7 @@ inject_elf_info_t KittyInjector::nativeInject(KittyIOFile &elfFile, bool *bCalld
             return;
         }
 
-        elfFile.writeToFd(rmemfdFile.fd());
+        elfFile.copyToFd(rmemfdFile.fd());
 
         // restrict further modifications to remote memfd
         _rsyscall.rmemfd_seal(rmemfd, F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE | F_SEAL_SEAL);
@@ -797,7 +839,7 @@ inject_elf_info_t KittyInjector::emuInject(KittyIOFile &elfFile, bool *bCalldler
             return;
         }
 
-        elfFile.writeToFd(rmemfdFile.fd());
+        elfFile.copyToFd(rmemfdFile.fd());
 
         // restrict further modifications to remote memfd
         _rsyscall.rmemfd_seal(rmemfd, F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE | F_SEAL_SEAL);
@@ -932,7 +974,7 @@ bool KittyInjector::hideLibrary(inject_elf_info_t &injected)
         }
 
         uintptr_t si_next_offset = _kMgr->linkerScanner.soinfo_offsets().next;
-        if (!si_next_offset)
+        if (si_next_offset == kitty_soinfo_offsets_t::noff)
         {
             KITTY_LOGE("hideLibrary: Failed to find linker soinfo next offset!");
             return false;
@@ -1005,7 +1047,7 @@ bool KittyInjector::hideLibrary(inject_elf_info_t &injected)
             }
 
             uintptr_t si_next_offset = _kMgr->nbScanner.soinfo_offsets().next;
-            if (!si_next_offset)
+            if (si_next_offset == kitty_soinfo_offsets_t::noff)
             {
                 KITTY_LOGE("hideLibrary: Emulated soinfo next offset not found!");
                 return false;

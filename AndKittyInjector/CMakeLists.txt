@@ -9,6 +9,7 @@ project(AndKittyInjector
 # Options
 # -----------------------------
 option(KT_DISABLE_KEYSTONE "Disable keystone support" ON)
+option(KT_ENABLE_LOG "Enable diagnostic log output in Debug builds" ON)
 
 # -----------------------------
 # C++ standard
@@ -46,6 +47,7 @@ target_compile_definitions(AndKittyInjectorCore
         $<$<CONFIG:Debug>:DEBUG>
         $<$<CONFIG:Release>:NDEBUG>
         $<$<BOOL:${KT_DISABLE_KEYSTONE}>:kNO_KEYSTONE>
+        $<$<NOT:$<AND:$<BOOL:${KT_ENABLE_LOG}>,$<CONFIG:Debug>>>:kNO_LOG>
 )
 target_compile_options(AndKittyInjectorCore
     PRIVATE
@@ -79,6 +81,7 @@ target_compile_definitions(AndKittyInjector
         $<$<CONFIG:Debug>:DEBUG>
         $<$<CONFIG:Release>:NDEBUG>
         $<$<BOOL:${KT_DISABLE_KEYSTONE}>:kNO_KEYSTONE>
+        $<$<NOT:$<AND:$<BOOL:${KT_ENABLE_LOG}>,$<CONFIG:Debug>>>:kNO_LOG>
 )
 target_compile_options(AndKittyInjector
     PRIVATE

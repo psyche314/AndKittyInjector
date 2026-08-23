@@ -105,12 +105,12 @@ public:
     bool validateElf(const std::string &elfPath, KT_ElfW(Ehdr) * hdr, bool *needsNB);
     bool waitBreakpoint(bool needsNB);
     inject_elf_info_t inject(const std::string &elfPath);
+    bool unload(inject_elf_info_t &injected);
 
 private:
     inject_elf_info_t nativeInject(KittyIOFile &elfFile, bool *bCalldlerror = nullptr);
     inject_elf_info_t emuInject(KittyIOFile &elfFile, bool *bCalldlerror = nullptr);
 
-    bool unloadLibrary(inject_elf_info_t &injected);
     bool hideLibrary(inject_elf_info_t &injected);
 
     uintptr_t getJavaVM(inject_elf_info_t &injected);

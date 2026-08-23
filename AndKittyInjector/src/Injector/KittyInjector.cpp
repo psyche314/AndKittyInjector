@@ -445,7 +445,7 @@ inject_elf_info_t KittyInjector::inject(const std::string &elfPath)
             {
                 KITTY_LOGE("Injector: Failed to hide %s!", injected.elf.filePath().c_str());
                 KITTY_LOGI("Unloading %s...", injected.elf.filePath().c_str());
-                if (unloadLibrary(injected))
+                if (unload(injected))
                     KITTY_LOGI("Injector: Library unloaded successfully.");
                 else
                     KITTY_LOGW("Injector: Failed to unload library!");
@@ -480,7 +480,7 @@ inject_elf_info_t KittyInjector::inject(const std::string &elfPath)
         if (_cfg.free)
         {
             KITTY_LOGI("Injector: Unloading library...");
-            if (unloadLibrary(injected))
+            if (unload(injected))
             {
                 KITTY_LOGI("Injector: Library unloaded successfully.");
             }
@@ -916,7 +916,7 @@ inject_elf_info_t KittyInjector::emuInject(KittyIOFile &elfFile, bool *bCalldler
     return info;
 }
 
-bool KittyInjector::unloadLibrary(inject_elf_info_t &injected)
+bool KittyInjector::unload(inject_elf_info_t &injected)
 {
     if (!injected.is_valid())
         return false;

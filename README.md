@@ -128,6 +128,10 @@ inject_elf_info_t result = injector.inject("/data/local/tmp/libtest.so");
 if (result.is_valid())
 {
     // result.dl_handle, result.soinfo, result.pJvm, result.pJNI_OnLoad are populated
+
+    // Keep result while the library is loaded. The same handle is required
+    // when calling unload() later.
+    injector.unload(result);
 }
 
 kMgr.trace.detach();

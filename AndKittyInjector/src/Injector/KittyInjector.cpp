@@ -245,7 +245,7 @@ bool KittyInjector::waitBreakpoint(bool needsNB)
             uintptr_t arg1 = _kMgr->trace.getArgFromRegs<uintptr_t>(regs, 1);
 
             std::string filePath = _kMgr->readMemStr(arg0, 0xff);
-            int flags = arg1;
+            [[maybe_unused]] int flags = arg1;
 
             KITTY_LOGI("bp]: dlopen(%s, %d)", filePath.c_str(), flags);
 

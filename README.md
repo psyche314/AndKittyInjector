@@ -82,6 +82,23 @@ One of `--pid` or `--package` is required. `--libs` accepts one or more paths an
 
 ## Embedding as a library
 
+The CMake and ndk-build projects expose the reusable injector core separately
+from the command-line entry point. The `AndKittyInjector::Core` CMake target
+contains `KittyInjector` and `KittyMemoryEx`, but does not contain
+`src/main.cpp`; the `AndKittyInjector` executable links that core target.
+
+```cmake
+add_subdirectory(path/to/AndKittyInjector
+    "${CMAKE_CURRENT_BINARY_DIR}/AndKittyInjector"
+    EXCLUDE_FROM_ALL
+)
+target_link_libraries(my_client PRIVATE AndKittyInjector::Core)
+```
+
+The equivalent ndk-build module is `AndKittyInjectorCore`. The
+`KittyMemoryEx` submodule must be initialized before configuring either build
+system.
+
 `KittyInjector` can be used directly instead of through the CLI, e.g. from your own tool:
 
 ```cpp

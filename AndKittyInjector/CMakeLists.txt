@@ -25,42 +25,61 @@ file(GLOB KITTYMEMORY_SRC "${KITTYMEMORY_PATH}/*.cpp")
 set(KEYSTONE_LIB ${KITTYMEMORY_PATH}/Deps/Keystone/libs-android/${CMAKE_ANDROID_ARCH_ABI}/libkeystone.a)
 
 # -----------------------------
-# Project sources
+# Reusable injector core
 # -----------------------------
-file(GLOB PROJ_SRC
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/*.cpp"
-    "${CMAKE_CURRENT_SOURCE_DIR}/src/Injector/*.cpp"
-)
-
-# -----------------------------
-# Executable
-# -----------------------------
-add_executable(AndKittyInjector
-    ${PROJ_SRC}
+# Keep the CLI entry point out of this target so another executable can embed
+# KittyInjector directly instead of invoking the command-line tool.
+add_library(AndKittyInjectorCore STATIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Injector/KittyInjector.cpp"
     ${KITTYMEMORY_SRC}
 )
+add_library(AndKittyInjector::Core ALIAS AndKittyInjectorCore)
 
-# -----------------------------
-# Includes
-# -----------------------------
-target_include_directories(AndKittyInjector
+target_compile_features(AndKittyInjectorCore PUBLIC cxx_std_20)
+target_include_directories(AndKittyInjectorCore
+    PUBLIC
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        "${KITTYMEMORY_PATH}"
+)
+target_compile_definitions(AndKittyInjectorCore
     PRIVATE
-        ${KITTYMEMORY_PATH}
+        $<$<CONFIG:Debug>:DEBUG>
+        $<$<CONFIG:Release>:NDEBUG>
+        $<$<BOOL:${KT_DISABLE_KEYSTONE}>:kNO_KEYSTONE>
+)
+target_compile_options(AndKittyInjectorCore
+    PRIVATE
+        $<$<CONFIG:Debug>:-O0 -g>
+        $<$<CONFIG:Release>:-O2>
+        -Wall
+        -Wextra
+        -Werror
+        -fexceptions
+        -Wno-unused-command-line-argument
+)
+set_target_properties(AndKittyInjectorCore PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
 )
 
 # -----------------------------
-# Compile definitions
+# CLI executable
 # -----------------------------
+add_executable(AndKittyInjector
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/main.cpp"
+    "${CMAKE_CURRENT_SOURCE_DIR}/src/Utils.cpp"
+)
+target_compile_features(AndKittyInjector PRIVATE cxx_std_20)
+target_include_directories(AndKittyInjector
+    PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src"
+        "${KITTYMEMORY_PATH}"
+)
 target_compile_definitions(AndKittyInjector
     PRIVATE
         $<$<CONFIG:Debug>:DEBUG>
         $<$<CONFIG:Release>:NDEBUG>
         $<$<BOOL:${KT_DISABLE_KEYSTONE}>:kNO_KEYSTONE>
 )
-
-# -----------------------------
-# Compile options
-# -----------------------------
 target_compile_options(AndKittyInjector
     PRIVATE
         $<$<CONFIG:Debug>:-O0 -g>
@@ -71,10 +90,15 @@ target_compile_options(AndKittyInjector
         -fexceptions
         -Wno-unused-command-line-argument
 )
+target_link_libraries(AndKittyInjector PRIVATE AndKittyInjector::Core)
 
 # -----------------------------
 # Platform-specific libraries
 # -----------------------------
 if(ANDROID)
-    target_link_libraries(AndKittyInjector PRIVATE log $<$<NOT:$<BOOL:${KT_DISABLE_KEYSTONE}>>:${KEYSTONE_LIB}>)
+    target_link_libraries(AndKittyInjectorCore
+        PUBLIC
+            log
+            $<$<NOT:$<BOOL:${KT_DISABLE_KEYSTONE}>>:${KEYSTONE_LIB}>
+    )
 endif()

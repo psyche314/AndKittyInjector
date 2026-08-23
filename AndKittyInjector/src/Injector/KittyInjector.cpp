@@ -925,7 +925,7 @@ bool KittyInjector::unload(inject_elf_info_t &injected)
 
     if (injected.is_native)
     {
-        freed = _kMgr->trace.callFunction(_rdlclose, injected.dl_handle);
+        freed = _kMgr->trace.callFunctionFrom(_dl_caller, _rdlclose, injected.dl_handle);
     }
     else if (_kMgr->nbScanner.nbItfData().unloadLibrary)
     {

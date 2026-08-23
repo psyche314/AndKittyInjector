@@ -134,6 +134,9 @@ if (result.is_valid())
     injector.unload(result);
 }
 
+// Move the traced thread away from the synthetic remote-call return trap
+// before detaching. This is required by some native-bridge environments.
+kMgr.trace.waitSyscall();
 kMgr.trace.detach();
 ```
 

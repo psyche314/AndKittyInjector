@@ -431,7 +431,7 @@ inject_elf_info_t KittyInjector::inject(const std::string &elfPath)
 
     if (injected.is_valid())
     {
-        if (injected.pJNI_OnLoad)
+        if (_cfg.entrypoint && injected.pJNI_OnLoad)
         {
             KITTY_LOGI("Injector: Getting JavaVM...");
             injected.pJvm = getJavaVM(injected);
@@ -458,20 +458,21 @@ inject_elf_info_t KittyInjector::inject(const std::string &elfPath)
         if (_cfg.beforeEntryPoint)
             _cfg.beforeEntryPoint(injected);
 
-        if (injected.pJNI_OnLoad && injected.pJvm)
+        if (_cfg.entrypoint && injected.pJNI_OnLoad && injected.pJvm)
         {
             injected.secretKey = kINJ_SECRET_KEY;
             callEntryPoint(injected);
         }
         else
         {
-            if (!injected.pJNI_OnLoad)
+            if (_cfg.entrypoint && !injected.pJNI_OnLoad)
                 KITTY_LOGW("Injector: Couldn't find JNI_OnLoad symbol.");
 
-            if (!injected.pJvm)
+            if (_cfg.entrypoint && !injected.pJvm)
                 KITTY_LOGW("Injector: Couldn't find JavaVM.");
 
-            KITTY_LOGW("Injector: Skipping EntryPoint");
+            if (_cfg.entrypoint)
+                KITTY_LOGW("Injector: Skipping EntryPoint");
         }
 
         if (_cfg.afterEntryPoint)
@@ -880,7 +881,7 @@ inject_elf_info_t KittyInjector::emuInject(KittyIOFile &elfFile, bool *bCalldler
         do_legacy_dlopen();
     }
 
-    if (info.is_valid())
+    if (info.is_valid() && _cfg.entrypoint)
     {
         if (!_kMgr->writeMemStr(_rbuffer, "JNI_OnLoad"))
         {

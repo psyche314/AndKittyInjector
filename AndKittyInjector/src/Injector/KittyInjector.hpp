@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -103,8 +104,10 @@ public:
     }
 
     bool validateElf(const std::string &elfPath, KT_ElfW(Ehdr) * hdr, bool *needsNB);
+    bool validateElf(const void *elfData, std::size_t elfSize, KT_ElfW(Ehdr) * hdr, bool *needsNB);
     bool waitBreakpoint(bool needsNB);
     inject_elf_info_t inject(const std::string &elfPath);
+    inject_elf_info_t inject(const void *elfData, std::size_t elfSize);
     bool unload(inject_elf_info_t &injected);
 
 private:

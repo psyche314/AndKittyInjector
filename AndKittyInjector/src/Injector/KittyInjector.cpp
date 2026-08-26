@@ -1,8 +1,53 @@
 #include "KittyInjector.hpp"
+#include <cerrno>
+#include <sys/syscall.h>
 #include <thread>
+#include <unistd.h>
 
 #define kUSE_STACK_BUFFER 1
 #define kREMOTE_BUFF_SIZE (KT_PAGE_SIZE)
+
+namespace {
+
+class ScopedFd final {
+  public:
+    explicit ScopedFd(int fd) noexcept : m_fd(fd) {
+    }
+
+    ~ScopedFd() {
+        if (m_fd >= 0)
+            ::close(m_fd);
+    }
+
+    ScopedFd(const ScopedFd &) = delete;
+    ScopedFd &operator=(const ScopedFd &) = delete;
+
+    [[nodiscard]] int get() const noexcept {
+        return m_fd;
+    }
+
+  private:
+    int m_fd;
+};
+
+bool WriteAll(int fd, const void *data, std::size_t size) noexcept {
+    const auto *bytes = static_cast<const std::uint8_t *>(data);
+    std::size_t offset = 0;
+    while (offset < size) {
+        const ssize_t written = ::write(fd, bytes + offset, size - offset);
+        if (written < 0) {
+            if (errno == EINTR)
+                continue;
+            return false;
+        }
+        if (written == 0)
+            return false;
+        offset += static_cast<std::size_t>(written);
+    }
+    return true;
+}
+
+} // namespace
 
 std::string EMachineToStr(int16_t em)
 {
@@ -154,6 +199,44 @@ bool KittyInjector::validateElf(const std::string &elfPath, KT_ElfW(Ehdr) * hdr,
                    elfPath.c_str(),
                    (libHdr.e_ident[EI_CLASS] == ELFCLASS32 ? 32 : 64),
                    KT_ELFCLASS_BITS);
+        return false;
+    }
+
+    if (needsNB)
+        *needsNB = libHdr.e_machine != kInjectorEM;
+
+    return true;
+}
+
+bool KittyInjector::validateElf(const void *elfData,
+                                std::size_t elfSize,
+                                KT_ElfW(Ehdr) *hdr,
+                                bool *needsNB)
+{
+    if (elfData == nullptr || elfSize < sizeof(KT_ElfW(Ehdr)))
+    {
+        KITTY_LOGE("Injector: Embedded ELF data is incomplete.");
+        return false;
+    }
+
+    KT_ElfW(Ehdr) libHdr = {};
+    memcpy(&libHdr, elfData, sizeof(libHdr));
+
+    if (hdr)
+        memcpy(hdr, &libHdr, sizeof(libHdr));
+
+    if (memcmp(libHdr.e_ident, "\177ELF", 4) != 0)
+    {
+        KITTY_LOGE("Injector: Embedded data is not a valid ELF!");
+        return false;
+    }
+
+    if (libHdr.e_ident[EI_CLASS] != KT_ELF_EICLASS)
+    {
+        KITTY_LOGE(
+            "Injector: Embedded ELF is %dbit but Injector is %dbit!",
+            (libHdr.e_ident[EI_CLASS] == ELFCLASS32 ? 32 : 64),
+            KT_ELFCLASS_BITS);
         return false;
     }
 
@@ -553,6 +636,41 @@ inject_elf_info_t KittyInjector::inject(const std::string &elfPath)
     cleanUp();
 
     return injected;
+}
+
+inject_elf_info_t KittyInjector::inject(const void *elfData, std::size_t elfSize)
+{
+    if (elfData == nullptr || elfSize == 0)
+    {
+        KITTY_LOGE("Injector: Embedded ELF data is empty.");
+        return {};
+    }
+
+    if (!_cfg.memfd)
+    {
+        KITTY_LOGE("Injector: Embedded ELF injection requires memfd mode.");
+        return {};
+    }
+
+    const int rawFd = static_cast<int>(::syscall(
+        syscall_memfd_create_n,
+        "kitty-embedded",
+        MFD_CLOEXEC | MFD_ALLOW_SEALING));
+    ScopedFd fd(rawFd);
+    if (fd.get() < 0)
+    {
+        KITTY_LOGE("Injector: Local memfd_create failed: %s.", std::strerror(errno));
+        return {};
+    }
+
+    if (!WriteAll(fd.get(), elfData, elfSize) || ::lseek(fd.get(), 0, SEEK_SET) < 0)
+    {
+        KITTY_LOGE("Injector: Failed to populate local memfd: %s.", std::strerror(errno));
+        return {};
+    }
+
+    const std::string fdPath = KittyUtils::String::fmt("/proc/self/fd/%d", fd.get());
+    return inject(fdPath);
 }
 
 inject_elf_info_t KittyInjector::nativeInject(KittyIOFile &elfFile, bool *bCalldlerror)

@@ -101,7 +101,6 @@ bool KittyInjector::init(KittyMemoryMgr *kmgr, const inject_elf_config_t &cfg)
                 break;
         }
     }
-
     auto targetEM = _kMgr->elfScanner.getProgramElf().header().e_machine;
     if (kInjectorEM != targetEM)
     {
@@ -726,12 +725,18 @@ inject_elf_info_t KittyInjector::nativeInject(KittyIOFile &elfFile, bool *bCalld
             return;
         }
 
+        const auto closeRemoteMemfd = [&]() {
+            if (!_rsyscall.rclose(rmemfd))
+                KITTY_LOGW("nativeInject: Failed to close remote memfd: %s.", _rsyscall.lastError().c_str());
+        };
+
         std::string rmemfdPath = KittyUtils::String::fmt("/proc/%d/fd/%d", _kMgr->processID(), rmemfd);
         KittyIOFile rmemfdFile(rmemfdPath, O_RDWR);
         if (!rmemfdFile.open())
         {
             KITTY_LOGE("nativeInject: Failed to open remote memfd file, errno (\"%s\").",
                        rmemfdFile.lastStrError().c_str());
+            closeRemoteMemfd();
             return;
         }
 
@@ -748,10 +753,13 @@ inject_elf_info_t KittyInjector::nativeInject(KittyIOFile &elfFile, bool *bCalld
         if (!_kMgr->writeMem(rdlextinfo, &extinfo, sizeof(extinfo)))
         {
             KITTY_LOGE("nativeInject: Failed to write dlextinfo into stack!");
+            closeRemoteMemfd();
             return;
         }
 
         auto ret = _kMgr->trace.callFunctionFrom(_dl_caller, _rdlopen_ext, _rbuffer, _cfg.rtdl_flags, rdlextinfo);
+        if (ret.status == KT_RP_CALL_SUCCESS || _kMgr->trace.isAttached())
+            closeRemoteMemfd();
         if (ret.status != KT_RP_CALL_SUCCESS)
         {
             KITTY_LOGE("nativeInject: Failed to call dlopen_ext.");
@@ -950,11 +958,17 @@ inject_elf_info_t KittyInjector::emuInject(KittyIOFile &elfFile, bool *bCalldler
             return;
         }
 
+        const auto closeRemoteMemfd = [&]() {
+            if (!_rsyscall.rclose(rmemfd))
+                KITTY_LOGW("emuInject: Failed to close remote memfd: %s.", _rsyscall.lastError().c_str());
+        };
+
         std::string rmemfdPath = KittyUtils::String::fmt("/proc/%d/fd/%d", _kMgr->processID(), rmemfd);
         KittyIOFile rmemfdFile(rmemfdPath, O_RDWR);
         if (!rmemfdFile.open())
         {
             KITTY_LOGE("emuInject: Failed to open remote memfd file, errno = %s.", rmemfdFile.lastStrError().c_str());
+            closeRemoteMemfd();
             return;
         }
 
@@ -964,6 +978,8 @@ inject_elf_info_t KittyInjector::emuInject(KittyIOFile &elfFile, bool *bCalldler
         _rsyscall.rmemfd_seal(rmemfd, F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE | F_SEAL_SEAL);
 
         auto ret = emu_dlopen(rmemfdPath);
+        if (ret.status == KT_RP_CALL_SUCCESS || _kMgr->trace.isAttached())
+            closeRemoteMemfd();
         if (ret.status != KT_RP_CALL_SUCCESS)
         {
             KITTY_LOGE("nativeInject: Failed to call native bridge loadLibaryExt.");
@@ -1040,15 +1056,36 @@ bool KittyInjector::unload(inject_elf_info_t &injected)
     if (!injected.is_valid())
         return false;
 
-    kitty_rp_call_t freed;
+    kitty_rp_call_t freed{};
 
     if (injected.is_native)
     {
+        if (_rdlclose == 0)
+        {
+            KITTY_LOGE("Injector: remote dlclose is unavailable!");
+            return false;
+        }
         freed = _kMgr->trace.callFunctionFrom(_dl_caller, _rdlclose, injected.dl_handle);
     }
-    else if (_kMgr->nbScanner.nbItfData().unloadLibrary)
+    else
     {
-        freed = _kMgr->trace.callFunction((uintptr_t)(_kMgr->nbScanner.nbItfData().unloadLibrary), injected.dl_handle);
+        // unload() may be called from a new KittyInjector session, so the
+        // Native Bridge scanner has not necessarily been initialized by a
+        // preceding emulated injection. Resolve the callback again instead
+        // of dereferencing a stale/default callback table.
+        nbItf_data_t callbacks{};
+        if (!findNbCallbacks(&callbacks) || callbacks.unloadLibrary == nullptr)
+        {
+            KITTY_LOGE("Injector: Native Bridge unloadLibrary callback is unavailable!");
+            return false;
+        }
+        // This is a native Houdini callback. A valid non-executable return
+        // trap is required here; returning through address 0 can poison the
+        // bridge state and make a subsequent load/unload crash the process.
+        freed = _kMgr->trace.callFunctionFrom(
+            _dl_caller,
+            (uintptr_t)(callbacks.unloadLibrary),
+            injected.dl_handle);
     }
 
     return freed.status == KT_RP_CALL_SUCCESS && freed.result.val == 0;

@@ -4,6 +4,7 @@
 
 #ifdef __aarch64__
 #define syscall_getpid_n 172
+#define syscall_close_n 57
 #define syscall_prctl_n 167
 #define syscall_fcntl_n 25
 #define syscall_mprotect_n 226
@@ -12,6 +13,7 @@
 #define syscall_memfd_create_n 279
 #elif __arm__
 #define syscall_getpid_n 20
+#define syscall_close_n 6
 #define syscall_prctl_n 172
 #define syscall_fcntl_n 221 // fcntl64
 #define syscall_mprotect_n 125
@@ -20,6 +22,7 @@
 #define syscall_memfd_create_n 385
 #elif __i386__
 #define syscall_getpid_n 20
+#define syscall_close_n 6
 #define syscall_prctl_n 172
 #define syscall_fcntl_n 55
 #define syscall_mprotect_n 125
@@ -28,6 +31,7 @@
 #define syscall_memfd_create_n 356
 #elif __x86_64__
 #define syscall_getpid_n 39
+#define syscall_close_n 3
 #define syscall_prctl_n 157
 #define syscall_fcntl_n 72
 #define syscall_mprotect_n 10
@@ -153,6 +157,19 @@ public:
             return 0;
 
         auto ret = _kMgr->trace.callSyscall(syscall_fcntl_n, rmemfd, F_ADD_SEALS, seals);
+        if (ret.result.val < 0)
+        {
+            _lastError = strerror(-ret.result.val);
+        }
+        return ret.status == KT_RP_CALL_SUCCESS && ret.result.val == 0;
+    }
+
+    inline bool rclose(int remoteFd)
+    {
+        if (remoteFd < 0 || !_kMgr || !_kMgr->isMemValid())
+            return false;
+
+        auto ret = _kMgr->trace.callSyscall(syscall_close_n, remoteFd);
         if (ret.result.val < 0)
         {
             _lastError = strerror(-ret.result.val);

@@ -758,7 +758,7 @@ inject_elf_info_t KittyInjector::nativeInject(KittyIOFile &elfFile, bool *bCalld
         }
 
         auto ret = _kMgr->trace.callFunctionFrom(_dl_caller, _rdlopen_ext, _rbuffer, _cfg.rtdl_flags, rdlextinfo);
-        if (ret.status == KT_RP_CALL_SUCCESS || _kMgr->trace.isAttached())
+        if (ret.status == KT_RP_CALL_SUCCESS)
             closeRemoteMemfd();
         if (ret.status != KT_RP_CALL_SUCCESS)
         {
@@ -806,6 +806,8 @@ inject_elf_info_t KittyInjector::emuInject(KittyIOFile &elfFile, bool *bCalldler
 
     auto &nb = _kMgr->nbScanner;
     auto nbData = nb.nbItfData();
+    const uintptr_t nativeBridgeLoadLibraryExt =
+        nb.nbElf().findSymbol("NativeBridgeLoadLibraryExt");
 
     KITTY_LOGI("emuInject: NativeBridge version %d.", nbData.version);
 
@@ -844,24 +846,11 @@ inject_elf_info_t KittyInjector::emuInject(KittyIOFile &elfFile, bool *bCalldler
             uintptr_t ns = 0;
             if (nb.isHoudini())
             {
+                // Houdini exposes the class-loader namespace as the stable
+                // token 3. Querying getExportedNamespace from an arbitrary
+                // translated thread can block, so do not make injection
+                // depend on that optional query.
                 ns = 3;
-                if (nbData.version >= KT_NB_RUNTIME_NAMESPACE_VERSION)
-                {
-                    if (!_kMgr->writeMemStr(_rbuffer, "classloader-namespace"))
-                    {
-                        KITTY_LOGE("emuInject: Failed to write classloader name into stack!");
-                        return {KT_RP_CALL_MEM_FAILED, {0}};
-                    }
-                    auto cls_ns = _kMgr->trace.callFunction((uintptr_t)nbData.getExportedNamespace, _rbuffer);
-                    if (cls_ns.status != KT_RP_CALL_SUCCESS)
-                    {
-                        KITTY_LOGE("emuInject: Failed to call getExportedNamespace.");
-                        return cls_ns;
-                    }
-
-                    if (cls_ns.result.ptr > 0 && cls_ns.result.ptr <= 25)
-                        ns = cls_ns.result.ptr;
-                }
             }
             else
             {
@@ -904,7 +893,15 @@ inject_elf_info_t KittyInjector::emuInject(KittyIOFile &elfFile, bool *bCalldler
                 return {KT_RP_CALL_MEM_FAILED, {0}};
             }
 
-            return _kMgr->trace.callFunction((uintptr_t)nbData.loadLibraryExt, _rbuffer, _cfg.rtdl_flags, ns);
+            const uintptr_t loadLibraryExt = nativeBridgeLoadLibraryExt != 0
+                                                 ? nativeBridgeLoadLibraryExt
+                                                 : (uintptr_t)nbData.loadLibraryExt;
+            return _kMgr->trace.callFunctionFrom(
+                _dl_caller,
+                loadLibraryExt,
+                _rbuffer,
+                _cfg.rtdl_flags,
+                ns);
         }
 
         return {KT_RP_CALL_FAILED, {0}};
@@ -978,7 +975,7 @@ inject_elf_info_t KittyInjector::emuInject(KittyIOFile &elfFile, bool *bCalldler
         _rsyscall.rmemfd_seal(rmemfd, F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE | F_SEAL_SEAL);
 
         auto ret = emu_dlopen(rmemfdPath);
-        if (ret.status == KT_RP_CALL_SUCCESS || _kMgr->trace.isAttached())
+        if (ret.status == KT_RP_CALL_SUCCESS)
             closeRemoteMemfd();
         if (ret.status != KT_RP_CALL_SUCCESS)
         {
@@ -1079,13 +1076,14 @@ bool KittyInjector::unload(inject_elf_info_t &injected)
             KITTY_LOGE("Injector: Native Bridge unloadLibrary callback is unavailable!");
             return false;
         }
-        // This is a native Houdini callback. A valid non-executable return
-        // trap is required here; returning through address 0 can poison the
-        // bridge state and make a subsequent load/unload crash the process.
-        freed = _kMgr->trace.callFunctionFrom(
-            _dl_caller,
-            (uintptr_t)(callbacks.unloadLibrary),
-            injected.dl_handle);
+        const uintptr_t nativeBridgeUnloadLibrary =
+            _kMgr->nbScanner.nbElf().findSymbol("NativeBridgeUnloadLibrary");
+        const uintptr_t unloadLibrary = nativeBridgeUnloadLibrary != 0
+                                             ? nativeBridgeUnloadLibrary
+                                             : (uintptr_t)(callbacks.unloadLibrary);
+        // Use a valid non-executable return trap for the native bridge wrapper;
+        // returning through address 0 can poison Houdini's bridge state.
+        freed = _kMgr->trace.callFunctionFrom(_dl_caller, unloadLibrary, injected.dl_handle);
     }
 
     return freed.status == KT_RP_CALL_SUCCESS && freed.result.val == 0;
